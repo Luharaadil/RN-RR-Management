@@ -1,0 +1,5 @@
+{
+  "name": "RN & RR Inventory Dashboard",
+  "description": "An inventory management dashboard for tracking RN and RR production requirements and available stock.",
+  "requestFramePermissions": []
+}
