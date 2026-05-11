@@ -1,4 +1,4 @@
-name: Send Dashboard Screenshot to LINE
+name: Daily Screenshot Report
 
 on:
   repository_dispatch:
@@ -6,22 +6,26 @@ on:
   workflow_dispatch:
 
 jobs:
-  screenshot:
+  run_bot:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Node.js
+      - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: Install dependencies
         run: npm install puppeteer axios form-data
 
-      - name: Take screenshot and send to LINE
+      - name: Run bot script
         env:
-          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
-          TARGET_URL: ${{ secrets.TARGET_URL }}
-        run: node scripts/send-screenshot.js
+          # Replace this with the ACTUAL live URL of your new webpage
+          SITE_URL: 'https://luharaadil.github.io/RN-RR-Management/'
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_GROUP_ID: ${{ secrets.LINE_GROUP_ID }}
+          IMGBB_API_KEY: ${{ secrets.IMGBB_API_KEY }}
+        # NOTE: Make sure this filename matches your script in Step 2
+        run: node scripts/report.cjs
