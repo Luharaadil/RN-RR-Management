@@ -1,0 +1,27 @@
+name: Send Dashboard Screenshot to LINE
+
+on:
+  repository_dispatch:
+    types: [send_screenshot]
+  workflow_dispatch:
+
+jobs:
+  screenshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install puppeteer axios form-data
+
+      - name: Take screenshot and send to LINE
+        env:
+          LINE_NOTIFY_TOKEN: ${{ secrets.LINE_NOTIFY_TOKEN }}
+          TARGET_URL: ${{ secrets.TARGET_URL }}
+        run: node scripts/send-screenshot.js
