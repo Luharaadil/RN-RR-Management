@@ -24,7 +24,14 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [detailsModal, setDetailsModal] = useState<{isOpen: boolean, rrName: string, data: InventoryData[], average: number}>({isOpen: false, rrName: '', data: [], average: 0});
+  const [rrUsageDetailsModal, setRrUsageDetailsModal] = useState<{
+    isOpen: boolean, 
+    rrName: string, 
+    type: 'NEXT_WEEK' | 'AVG_USAGE',
+    data: InventoryData[]
+  }>({isOpen: false, rrName: '', type: 'NEXT_WEEK', data: []});
   const [rrDetailsModal, setRrDetailsModal] = useState<{isOpen: boolean, rrName: string, items: InventoryData[]}>({isOpen: false, rrName: '', items: []});
+  const [rrUseType, setRrUseType] = useState<'NEXT_WEEK' | 'AVG_USAGE'>('NEXT_WEEK');
 
   useEffect(() => {
     fetch('https://script.google.com/macros/s/AKfycbw7kry3iRAJrmu3HY_oi27sLavISvu6tSedhcLqcIR66IpRT56991H365LrPlj88zXIAg/exec')
@@ -112,7 +119,7 @@ export default function App() {
       const rrkg = Number(item.rrkg) || 0;
       return sum + (batches * rrkg);
     }, 0);
-    return Number.isInteger(result) ? result : result.toFixed(1);
+    return result;
   };
 
   // Helper to get deduplicated past 7 days data (excluding selected date)
@@ -123,50 +130,95 @@ export default function App() {
     const endTime = selectedTime - (24 * 60 * 60 * 1000); // 1 day before selected date
     const startTime = selectedTime - (7 * 24 * 60 * 60 * 1000); // 7 days before selected date
     
-    const rawFiltered = allData.filter(d => {
-      if (d.rr !== rrName) return false;
-      const dTime = new Date(d.dateString).getTime();
-      return dTime >= startTime && dTime <= endTime;
-    });
+    // Get all data for this RR, sorted by date
+    const rrData = allData
+      .filter(d => d.rr === rrName)
+      .sort((a, b) => new Date(a.dateString).getTime() - new Date(b.dateString).getTime());
+
+    const result: InventoryData[] = [];
     
-    // Sort newest first
-    const sorted = rawFiltered.sort((a, b) => new Date(b.dateString).getTime() - new Date(a.dateString).getTime());
-    
-    // Deduplicate by date (if same day appears 2 times, consider it only once)
-    const uniqueData: InventoryData[] = [];
-    const seenDates = new Set<string>();
-    
-    for (const item of sorted) {
-      if (!seenDates.has(item.dateString)) {
-        seenDates.add(item.dateString);
-        uniqueData.push(item);
+    // Iterate through the 7 days
+    for (let i = 1; i <= 7; i++) {
+      const currentDate = new Date(selectedTime - (i * 24 * 60 * 60 * 1000));
+      const dateString = currentDate.toISOString().split('T')[0];
+      const displayDate = currentDate.toLocaleDateString('en-GB');
+
+      // Find data for this date
+      let dayData = rrData.find(d => d.dateString === dateString);
+
+      // If no data, find the most recent available data
+      if (!dayData) {
+        const availableBefore = rrData.filter(d => new Date(d.dateString).getTime() < currentDate.getTime());
+        if (availableBefore.length > 0) {
+          dayData = { ...availableBefore[availableBefore.length - 1], dateString, displayDate };
+        } else {
+          // If no previous data, default to zeros
+          dayData = { ...rrData[0], dateString, displayDate, batches: "0", weekBatches: "0" };
+        }
       }
+      result.push(dayData);
     }
     
-    return uniqueData;
+    return result;
+  };
+
+  // Calculate Average RR Usage for past 7 days (matching curve logic)
+  const getRRAvgUsage = (rrName: string) => {
+    const past7DaysData = getPast7DaysData(rrName);
+    const sum = past7DaysData.reduce((sum, item) => {
+      const batches = Number(item.batches) || 0;
+      const rrkg = Number(item.rrkg) || 0;
+      return sum + (batches * rrkg);
+    }, 0);
+    // User requested 7-day average, so divide by 7 regardless of number of days with data
+    return sum / 7;
+  };
+
+  // Get RR Use based on selected type
+  const getRRUse = (rrName: string) => {
+    return rrUseType === 'NEXT_WEEK' ? getRRNWUse(rrName) : getRRAvgUsage(rrName);
   };
 
   // Calculate 7-day RN Average
   const getRNAverage = (rrName: string) => {
     const past7DaysData = getPast7DaysData(rrName);
     const sum = past7DaysData.reduce((acc, curr) => acc + (Number(curr.dailyValue) || 0), 0);
-    return Math.round(sum / 7);
+    return past7DaysData.length > 0 ? Math.round(sum / past7DaysData.length) : 0;
   };
 
   // Calculate Use Day
   const getUseDay = (item: InventoryData) => {
     const usable = getUsable(item);
-    const nwUse = Number(getRRNWUse(item.rr));
+    const use = Number(getRRUse(item.rr));
     const rnAvg = getRNAverage(item.rr);
 
-    if (nwUse < rnAvg) {
+    if (use < rnAvg) {
       return "Out>Use";
-    } else if (nwUse === rnAvg) {
+    } else if (use === rnAvg) {
       return "Out=Use";
     } else {
-      const days = usable / (nwUse - rnAvg);
+      const days = usable / (use - rnAvg);
       return Math.round(days).toString();
     }
+  };
+
+
+  const handleWeightDoubleClick = (rrName: string) => {
+    if (!rrName || !selectedDate) return;
+    
+    let data: InventoryData[] = [];
+    if (rrUseType === 'NEXT_WEEK') {
+      data = rawDataForDate.filter(d => d.rr === rrName);
+    } else {
+      data = getPast7DaysData(rrName);
+    }
+
+    setRrUsageDetailsModal({
+      isOpen: true,
+      rrName,
+      type: rrUseType,
+      data
+    });
   };
 
   const handleDoubleClick = (rrName: string) => {
@@ -229,37 +281,41 @@ export default function App() {
   };
 
   return (
-    <div className="p-4 bg-white min-h-screen font-sans text-black overflow-x-auto relative">
-      <div className="min-w-[1000px]">
+    <div className="p-4 bg-gray-50 min-h-screen font-sans text-gray-800 overflow-x-auto relative">
+      <div className="min-w-[1000px] max-w-7xl mx-auto shadow-lg bg-white rounded-lg p-6">
+        <h1 className="text-2xl font-bold mb-6 text-gray-900 border-b pb-2">Daily Inventory Dashboard</h1>
         {/* Top Header Row */}
-        <div className="flex border border-black mb-2 w-max bg-[#f2f2f2]">
-          <div className="bg-[#92d050] p-4 border-r border-black font-bold text-2xl flex items-center justify-center w-32">
+        <div className="flex border border-gray-300 rounded-md overflow-hidden mb-6 w-max bg-gray-50 shadow-sm">
+          <div className="bg-[#92d050] bg-opacity-90 p-2 border-r border-gray-300 font-bold text-lg flex items-center justify-center w-24 text-gray-800">
             日期：
           </div>
-          <div className="p-4 border-r border-black font-bold text-3xl flex items-center justify-center w-56 bg-white">
+          <div className="p-2 border-r border-gray-300 font-bold text-xs flex items-center justify-center w-40 bg-white">
             <input 
               type="date" 
               value={selectedDate}
               onChange={(e) => setSelectedDate(e.target.value)}
-              className="w-full h-full text-center outline-none"
+              className="w-full h-full text-center outline-none text-gray-600 bg-transparent text-sm"
             />
           </div>
-          <div className="p-2 border-r border-black font-bold text-sm flex flex-col items-center justify-center text-center w-32">
+          <div 
+            className={`p-2 border-r border-gray-300 font-bold text-xs flex flex-col items-center justify-center text-center w-28 cursor-pointer transition-colors ${rrUseType === 'NEXT_WEEK' ? 'bg-yellow-300 text-gray-800' : 'hover:bg-gray-100 text-gray-600'}`}
+            onClick={() => setRrUseType('NEXT_WEEK')}
+          >
             <span>NEXT WEEK</span>
             <span>AVERAGE</span>
           </div>
-          <div className="p-2 border-r border-black font-bold text-sm flex flex-col items-center justify-center text-center w-28">
+          <div 
+            className={`p-2 border-r border-gray-300 font-bold text-xs flex flex-col items-center justify-center text-center w-24 cursor-pointer transition-colors ${rrUseType === 'AVG_USAGE' ? 'bg-yellow-300 text-gray-800' : 'hover:bg-gray-100 text-gray-600'}`}
+            onClick={() => setRrUseType('AVG_USAGE')}
+          >
             <span>AVERAGE</span>
             <span>USAGE</span>
           </div>
-          <div className="p-2 border-r border-black font-bold text-sm flex items-center justify-center text-center w-32">
-            CHECK RR
-          </div>
-          <div className="p-2 border-r border-black font-bold text-sm flex flex-col items-center justify-center text-center w-36">
+          <div className="p-2 border-r border-gray-300 font-bold text-xs flex flex-col items-center justify-center text-center w-28 text-gray-600">
             <span>RR</span>
             <span>COMPLETION</span>
           </div>
-          <div className="p-2 font-bold text-sm flex items-center justify-center text-center w-32 cursor-pointer bg-blue-500 text-white"
+          <div className="p-2 font-bold text-xs flex items-center justify-center text-center w-24 cursor-pointer bg-blue-600 text-white hover:bg-blue-700 transition-colors"
             onClick={() => selectedRubber && setCurveModal({isOpen: true, rrName: selectedRubber})}
           >
             CURVE
@@ -267,100 +323,112 @@ export default function App() {
         </div>
 
         {/* Main Table */}
-        <table className="border-collapse border border-black w-full text-center bg-white">
+        <div className="overflow-hidden rounded-md border border-gray-300 shadow-sm">
+        <table className="border-collapse w-full text-center bg-white">
           <thead>
             <tr>
-              <th colSpan={2} className="border border-black bg-[#fcd5b4] p-2">
-                <div className="font-bold text-lg">Production Requirement</div>
-                <div className="text-sm font-normal">(生產需求手數)</div>
+              <th colSpan={2} className="border-b border-r border-gray-300 bg-[#fcd5b4] bg-opacity-70 p-2.5">
+                <div className="font-semibold text-sm text-gray-800">Production Requirement</div>
+                <div className="text-[10px] font-normal text-gray-600 mt-0.5">(生產需求手數)</div>
               </th>
-              <th colSpan={4} className="border border-black bg-[#92d050] p-2">
-                <div className="font-bold text-lg">Available Inventory (kg)</div>
-                <div className="text-sm font-normal">
-                  ( 可使用庫存種類、重量、<span className="text-[#ff00ff] font-bold">MAX庫存&gt;7天</span> TO MIN庫存&lt;2天 )
+              <th colSpan={4} className="border-b border-r border-gray-300 bg-[#92d050] bg-opacity-70 p-2.5">
+                <div className="font-semibold text-sm text-gray-800">Available Inventory (kg)</div>
+                <div className="text-[10px] font-normal text-gray-600 mt-0.5">
+                  ( 可使用庫存種類、重量、<span className="text-[#ff00ff] font-bold mx-0.5">MAX庫存&gt;7天</span> TO MIN庫存&lt;2天 )
                 </div>
               </th>
-              <th rowSpan={2} className="border border-black bg-[#fcd5b4] p-2 w-32">
-                <div className="font-bold text-sm">RN AVERAGE</div>
-                <div className="text-xs font-normal">(平均RR產出量)</div>
+              <th rowSpan={2} className="border-b border-r border-gray-300 bg-[#fcd5b4] bg-opacity-70 p-2.5 w-28 align-middle">
+                <div className="font-semibold text-xs text-gray-800">RN AVERAGE</div>
+                <div className="text-[9px] font-normal text-gray-600 mt-1">(平均RR產出量)</div>
               </th>
-              <th rowSpan={2} className="border border-black bg-[#fcd5b4] p-2 w-32">
-                <div className="font-bold text-sm">USE DAY</div>
-                <div className="text-xs font-normal">(摻合需求天數)</div>
+              <th rowSpan={2} className="border-b border-gray-300 bg-[#fcd5b4] bg-opacity-70 p-2.5 w-28 align-middle">
+                <div className="font-semibold text-xs text-gray-800">USE DAY</div>
+                <div className="text-[9px] font-normal text-gray-600 mt-1">(摻合需求天數)</div>
               </th>
             </tr>
             <tr>
-              <th className="border border-black bg-[#fcd5b4] p-2 text-sm font-bold w-32">RR Type</th>
-              <th className="border border-black bg-[#fcd5b4] p-2 text-sm font-bold w-40">
-                <div>RR N.W Use (kg)</div>
-                <div className="text-xs font-normal">(RRxUOP¥-§i¶q)</div>
+              <th className="border-b border-r border-gray-300 bg-[#fcd5b4] bg-opacity-40 p-2 text-xs font-semibold text-gray-700 w-28">RR Type</th>
+              <th className="border-b border-r border-gray-300 bg-[#fcd5b4] bg-opacity-40 p-2 text-xs font-semibold text-gray-700 w-36">
+                <div>{rrUseType === 'NEXT_WEEK' ? 'RR N.W Use (kg)' : 'RR Avg Use (kg)'}</div>
+                <div className="text-[9px] font-normal text-gray-500 mt-0.5">(RRxUOP¥-§i¶q)</div>
               </th>
-              <th className="border border-black bg-[#92d050] p-2 text-sm font-bold w-40">
+              <th className="border-b border-r border-gray-300 bg-[#92d050] bg-opacity-40 p-2 text-xs font-semibold text-gray-700 w-36">
                 <div>Usable inventory</div>
-                <div className="text-xs font-normal">(可使用庫存總重)</div>
+                <div className="text-[9px] font-normal text-gray-500 mt-0.5">(可使用庫存總重)</div>
               </th>
-              <th className="border border-black bg-[#92d050] p-2 text-sm font-bold w-32">
+              <th className="border-b border-r border-gray-300 bg-[#92d050] bg-opacity-40 p-2 text-xs font-semibold text-gray-700 w-28">
                 <div>RN Inventory</div>
-                <div className="text-xs font-normal">(RN 庫存)</div>
+                <div className="text-[9px] font-normal text-gray-500 mt-0.5">(RN 庫存)</div>
               </th>
-              <th className="border border-black bg-[#92d050] p-2 text-sm font-bold w-32">
+              <th className="border-b border-r border-gray-300 bg-[#92d050] bg-opacity-40 p-2 text-xs font-semibold text-gray-700 w-28">
                 <div>RR Inventory</div>
-                <div className="text-xs font-normal">(RR 庫存)</div>
+                <div className="text-[9px] font-normal text-gray-500 mt-0.5">(RR 庫存)</div>
               </th>
-              <th className="border border-black bg-[#92d050] p-2 text-sm font-bold w-32">
+              <th className="border-b border-r border-gray-300 bg-[#92d050] bg-opacity-40 p-2 text-xs font-semibold text-gray-700 w-28">
                 <div>NG Inventory</div>
-                <div className="text-xs font-normal">(NG 膠料庫存)</div>
+                <div className="text-[9px] font-normal text-gray-500 mt-0.5">(NG 膠料庫存)</div>
               </th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className="divide-y divide-gray-200">
             {data.length > 0 ? data.map((item, index) => (
               <tr key={index} 
-                className={`cursor-pointer ${selectedRubber === item.rr ? 'bg-yellow-200' : 'hover:bg-gray-100'}`}
+                className={`cursor-pointer transition-colors ${selectedRubber === item.rr ? 'bg-yellow-50' : 'hover:bg-gray-50 text-gray-700'}`}
                 onClick={() => setSelectedRubber(item.rr)}
               >
                 <td 
-                  className="border border-black p-3 font-bold text-xl"
+                  className="border-r border-gray-200 p-2 font-medium text-sm text-gray-900 bg-white"
                   onDoubleClick={() => handleRRDoubleClick(item.rr)}
                   title="Double click to view RR details"
                 >
                   {item.rr}
                 </td>
-                <td className="border border-black p-3 font-bold text-2xl">{Number(getRRNWUse(item.rr)).toFixed(1)}</td>
-                <td className="border border-black p-3 font-bold text-2xl bg-[#ffffcc]">{Number(getUsable(item)).toFixed(1)}</td>
-                <td className="border border-black p-3 text-xl">{Number(item.rnStock).toFixed(1)}</td>
-                <td className="border border-black p-3 text-xl">{Number(item.rrStock).toFixed(1)}</td>
-                <td className="border border-black p-3 text-xl">{Number(item.ngkg).toFixed(1)}</td>
                 <td 
-                  className="border border-black p-3 font-bold text-2xl cursor-pointer hover:bg-gray-200 transition-colors"
+                  className="border-r border-gray-200 p-2 font-semibold text-base text-blue-700 cursor-pointer hover:bg-blue-50 transition-colors"
+                  onDoubleClick={() => handleWeightDoubleClick(item.rr)}
+                  title="Double click to view usage breakdown"
+                >
+                  {Number(getRRUse(item.rr)).toFixed(1)}
+                </td>
+                <td className="border-r border-gray-200 p-2 font-semibold text-base text-emerald-700 bg-emerald-50 bg-opacity-30">{Number(getUsable(item)).toFixed(1)}</td>
+                <td className="border-r border-gray-200 p-2 text-sm">{Number(item.rnStock).toFixed(1)}</td>
+                <td className="border-r border-gray-200 p-2 text-sm">{Number(item.rrStock).toFixed(1)}</td>
+                <td className="border-r border-gray-200 p-2 text-sm text-gray-500">{Number(item.ngkg).toFixed(1)}</td>
+                <td 
+                  className="border-r border-gray-200 p-2 font-semibold text-base text-indigo-600 cursor-pointer hover:bg-indigo-50 transition-colors"
                   onDoubleClick={() => handleDoubleClick(item.rr)}
                   title="Double click to view 7-day breakdown"
                 >
                   {getRNAverage(item.rr).toFixed(1)}
                 </td>
-                <td className="border border-black p-3 font-bold text-2xl">{getUseDay(item)}</td>
+                <td className="p-2 font-medium text-sm">
+                  <span className={`px-2 py-1 rounded inline-block ${getUseDay(item) === 'Out>Use' ? 'bg-red-100 text-red-700' : getUseDay(item) === 'Out=Use' ? 'bg-yellow-100 text-yellow-700' : 'bg-gray-100'}`}>
+                    {getUseDay(item)}
+                  </span>
+                </td>
               </tr>
             )) : (
               <tr>
-                <td colSpan={8} className="border border-black p-8 text-xl text-gray-500">
+                <td colSpan={8} className="p-10 text-base text-gray-400">
                   No data available for the selected date.
                 </td>
               </tr>
             )}
-            <tr>
-              <td colSpan={2} className="border border-black p-3 font-bold text-2xl text-right pr-6">
+            <tr className="bg-gray-50">
+              <td colSpan={2} className="p-3 font-semibold text-sm text-right pr-6 text-gray-600 border-r border-gray-200">
                 Total tons
               </td>
-              <td className="border border-black p-3 font-bold text-2xl bg-[#ffffcc]">
+              <td className="p-3 font-bold text-base text-emerald-800 bg-emerald-100 bg-opacity-50 border-r border-gray-200">
                 {totalTons}
               </td>
-              <td colSpan={4} className="border border-black p-3"></td>
+              <td colSpan={5} className="p-3"></td>
             </tr>
           </tbody>
         </table>
+        </div>
       </div>
 
-      {/* Details Modal */}
+      {/* Details Modal (RN Average) */}
       {detailsModal.isOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden border-2 border-black">
@@ -371,44 +439,104 @@ export default function App() {
               </button>
             </div>
             <div className="p-4">
-              <table className="w-full border-collapse border border-black mb-4 text-center">
+              <table className="w-full border-collapse border border-black mb-4 text-center text-sm">
                 <thead>
                   <tr className="bg-[#f2f2f2]">
-                    <th className="border border-black p-2 font-bold">Date</th>
-                    <th className="border border-black p-2 font-bold">Daily Value (kg)</th>
+                    <th className="border border-black p-1.5 font-bold">Date</th>
+                    <th className="border border-black p-1.5 font-bold">Daily Value (kg)</th>
                   </tr>
                 </thead>
                 <tbody>
                   {detailsModal.data.map((d, i) => (
                     <tr key={i}>
-                      <td className="border border-black p-2">{d.displayDate}</td>
-                      <td className="border border-black p-2 font-bold">{d.dailyValue || '0'}</td>
+                      <td className="border border-black p-1.5">{d.displayDate}</td>
+                      <td className="border border-black p-1.5 font-bold">{d.dailyValue || '0'}</td>
                     </tr>
                   ))}
                   {/* Fill empty rows if less than 7 days of data */}
                   {Array.from({ length: Math.max(0, 7 - detailsModal.data.length) }).map((_, i) => (
                     <tr key={`empty-${i}`} className="text-gray-400 bg-gray-50">
-                      <td className="border border-black p-2">--</td>
-                      <td className="border border-black p-2 italic">0 (No Data)</td>
+                      <td className="border border-black p-1.5">--</td>
+                      <td className="border border-black p-1.5 italic">0 (No Data)</td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="bg-[#ffffcc] font-bold">
-                    <td className="border border-black p-2 text-right">Total Sum:</td>
-                    <td className="border border-black p-2 text-xl">
+                    <td className="border border-black p-1.5 text-right">Total Sum:</td>
+                    <td className="border border-black p-1.5 text-base">
                       {detailsModal.data.reduce((acc, curr) => acc + (Number(curr.dailyValue) || 0), 0)}
                     </td>
                   </tr>
-                  <tr className="bg-[#92d050] font-bold text-lg">
-                    <td className="border border-black p-2 text-right">Average (Sum ÷ 7):</td>
-                    <td className="border border-black p-2 text-2xl">{detailsModal.average}</td>
+                  <tr className="bg-[#92d050] font-bold text-base">
+                    <td className="border border-black p-1.5 text-right">Average (Sum ÷ 7):</td>
+                    <td className="border border-black p-1.5 text-lg">{detailsModal.average}</td>
                   </tr>
                 </tfoot>
               </table>
               <div className="text-sm text-gray-600 italic text-center">
                 * The average is always divided by 7 days.
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RR Usage Details Modal */}
+      {rrUsageDetailsModal.isOpen && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden border-2 border-black">
+            <div className="bg-[#fcd5b4] border-b border-black px-4 py-3 flex justify-between items-center">
+              <h3 className="font-bold text-xl text-black">
+                {rrUsageDetailsModal.type === 'NEXT_WEEK' ? 'Next Week Usage' : '7-Day Avg Usage'}: {rrUsageDetailsModal.rrName}
+              </h3>
+              <button onClick={() => setRrUsageDetailsModal({...rrUsageDetailsModal, isOpen: false})} className="text-black hover:text-gray-600 font-bold text-2xl leading-none">
+                &times;
+              </button>
+            </div>
+            <div className="p-4">
+              <table className="w-full border-collapse border border-black mb-4 text-center text-sm">
+                <thead>
+                  <tr className="bg-[#f2f2f2]">
+                    <th className="border border-black p-1.5 font-bold">Date</th>
+                    <th className="border border-black p-1.5 font-bold">Batches</th>
+                    <th className="border border-black p-1.5 font-bold">RRkg</th>
+                    <th className="border border-black p-1.5 font-bold">Usage (kg)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rrUsageDetailsModal.data.map((d, i) => {
+                    const batches = Number(rrUsageDetailsModal.type === 'AVG_USAGE' ? d.batches : d.weekBatches) || 0;
+                    const rrkg = Number(d.rrkg) || 0;
+                    return (
+                      <tr key={i}>
+                        <td className="border border-black p-1.5">{d.displayDate}</td>
+                        <td className="border border-black p-1.5">{batches.toFixed(1)}</td>
+                        <td className="border border-black p-1.5">{rrkg.toFixed(1)}</td>
+                        <td className="border border-black p-1.5 font-bold">
+                          {(batches * rrkg).toFixed(1)}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+                <tfoot>
+                  <tr className="bg-[#92d050] font-bold text-base">
+                    <td className="border border-black p-1.5 text-right">
+                      {rrUsageDetailsModal.type === 'AVG_USAGE' ? 'Average:' : 'Total:'}
+                    </td>
+                    <td className="border border-black p-1.5 text-lg">
+                      {(
+                        rrUsageDetailsModal.data.reduce((sum, item) => {
+                          const batches = Number(rrUsageDetailsModal.type === 'AVG_USAGE' ? item.batches : item.weekBatches) || 0;
+                          const rrkg = Number(item.rrkg) || 0;
+                          return sum + (batches * rrkg);
+                        }, 0) / (rrUsageDetailsModal.type === 'AVG_USAGE' ? 7 : 1)
+                      ).toFixed(1)}
+                    </td>
+                  </tr>
+                </tfoot>
+              </table>
             </div>
           </div>
         </div>
@@ -425,71 +553,71 @@ export default function App() {
               </button>
             </div>
             <div className="p-0 overflow-y-auto flex-grow">
-              <table className="w-full border-collapse border border-black text-center">
+              <table className="w-full border-collapse border border-black text-center text-sm">
                 <tbody>
                   <tr>
-                    <td className="border border-black p-2 bg-[#fcd5b4] font-bold w-1/3">
+                    <td className="border border-black p-1.5 bg-[#fcd5b4] font-bold w-1/3">
                       <div>Rubber Type</div>
-                      <div className="text-xs font-normal">膠料種類</div>
+                      <div className="text-[10px] font-normal">膠料種類</div>
                     </td>
                     {rrDetailsModal.items.map((item, i) => (
-                      <td key={i} className="border border-black p-2 text-xl">{item.rubber}</td>
+                      <td key={i} className="border border-black p-1.5 text-base">{item.rubber}</td>
                     ))}
                     {/* Fill empty columns if less than 2 items */}
                     {Array.from({ length: Math.max(0, 2 - rrDetailsModal.items.length) }).map((_, i) => (
-                      <td key={`empty-rubber-${i}`} className="border border-black p-2"></td>
+                      <td key={`empty-rubber-${i}`} className="border border-black p-1.5"></td>
                     ))}
                   </tr>
                   <tr>
-                    <td className="border border-black p-2 bg-[#fcd5b4] font-bold">
+                    <td className="border border-black p-1.5 bg-[#fcd5b4] font-bold">
                       <div>摻合RR種類</div>
                     </td>
                     {rrDetailsModal.items.map((item, i) => (
-                      <td key={i} className="border border-black p-2 text-xl">{item.rr}</td>
+                      <td key={i} className="border border-black p-1.5 text-base">{item.rr}</td>
                     ))}
                     {Array.from({ length: Math.max(0, 2 - rrDetailsModal.items.length) }).map((_, i) => (
-                      <td key={`empty-rr-${i}`} className="border border-black p-2"></td>
+                      <td key={`empty-rr-${i}`} className="border border-black p-1.5"></td>
                     ))}
                   </tr>
                   <tr>
-                    <td className="border border-black p-2 bg-[#fcd5b4] font-bold">
+                    <td className="border border-black p-1.5 bg-[#fcd5b4] font-bold">
                       <div>摻合比率</div>
                     </td>
                     {rrDetailsModal.items.map((item, i) => (
-                      <td key={i} className="border border-black p-2 text-xl">{item.blendRatio ? `${(Number(item.blendRatio) * 100).toFixed(1)}%` : ''}</td>
+                      <td key={i} className="border border-black p-1.5 text-base">{item.blendRatio ? `${(Number(item.blendRatio) * 100).toFixed(1)}%` : ''}</td>
                     ))}
                     {Array.from({ length: Math.max(0, 2 - rrDetailsModal.items.length) }).map((_, i) => (
-                      <td key={`empty-ratio-${i}`} className="border border-black p-2"></td>
+                      <td key={`empty-ratio-${i}`} className="border border-black p-1.5"></td>
                     ))}
                   </tr>
                   <tr>
-                    <td className="border border-black p-2 bg-[#fcd5b4] font-bold">
+                    <td className="border border-black p-1.5 bg-[#fcd5b4] font-bold">
                       <div>摻合RR重量</div>
                     </td>
                     {rrDetailsModal.items.map((item, i) => (
-                      <td key={i} className="border border-black p-2 text-xl">{Number(item.rrkg).toFixed(1)}</td>
+                      <td key={i} className="border border-black p-1.5 text-base">{Number(item.rrkg).toFixed(1)}</td>
                     ))}
                     {Array.from({ length: Math.max(0, 2 - rrDetailsModal.items.length) }).map((_, i) => (
-                      <td key={`empty-rrkg-${i}`} className="border border-black p-2"></td>
+                      <td key={`empty-rrkg-${i}`} className="border border-black p-1.5"></td>
                     ))}
                   </tr>
                   <tr>
-                    <td className="border border-black p-2 bg-[#fcd5b4] font-bold">
+                    <td className="border border-black p-1.5 bg-[#fcd5b4] font-bold">
                       <div>摻合手數</div>
                     </td>
                     {rrDetailsModal.items.map((item, i) => (
-                      <td key={i} className="border border-black p-2 text-xl">{Number(item.weekBatches).toFixed(1)}</td>
+                      <td key={i} className="border border-black p-1.5 text-base">{Number(item.weekBatches).toFixed(1)}</td>
                     ))}
                     {Array.from({ length: Math.max(0, 2 - rrDetailsModal.items.length) }).map((_, i) => (
-                      <td key={`empty-batches-${i}`} className="border border-black p-2"></td>
+                      <td key={`empty-batches-${i}`} className="border border-black p-1.5"></td>
                     ))}
                   </tr>
                   <tr>
-                    <td className="border border-black p-2 bg-[#fcd5b4] font-bold">
+                    <td className="border border-black p-1.5 bg-[#fcd5b4] font-bold">
                       <div>摻合總重</div>
-                      <div className="text-xs font-normal">(kg)</div>
+                      <div className="text-[10px] font-normal">(kg)</div>
                     </td>
-                    <td colSpan={2} className="border border-black p-2 font-bold text-3xl">
+                    <td colSpan={2} className="border border-black p-1.5 font-bold text-xl">
                       {rrDetailsModal.items.reduce((sum, item) => sum + ((Number(item.weekBatches) || 0) * (Number(item.rrkg) || 0)), 0).toFixed(1)}
                     </td>
                   </tr>
@@ -497,57 +625,57 @@ export default function App() {
               </table>
 
               {/* Trend Data Placeholders (As per picture) */}
-              <table className="w-full border-collapse border border-black text-center mt-0">
+              <table className="w-full border-collapse border border-black text-center mt-0 text-sm">
                 <tbody>
-                  <tr className="bg-[#00b0f0] text-white font-bold text-sm">
-                    <td className="border border-black p-2 w-1/4">平均RR摻合</td>
-                    <td className="border border-black p-2 w-1/4">RR摻合<br/>趨勢差異</td>
-                    <td className="border border-black p-2 w-1/4 bg-[#92d050] text-black">現行每日<br/>平均手數</td>
-                    <td className="border border-black p-2 w-1/4 bg-[#92d050] text-black">排程<br/>手數趨勢</td>
+                  <tr className="bg-[#00b0f0] text-white font-bold text-xs">
+                    <td className="border border-black p-1.5 w-1/4">平均RR摻合</td>
+                    <td className="border border-black p-1.5 w-1/4">RR摻合<br/>趨勢差異</td>
+                    <td className="border border-black p-1.5 w-1/4 bg-[#92d050] text-black">現行每日<br/>平均手數</td>
+                    <td className="border border-black p-1.5 w-1/4 bg-[#92d050] text-black">排程<br/>手數趨勢</td>
                   </tr>
-                  <tr className="font-bold text-xl">
-                    <td className="border border-black p-2"><span className="text-red-500">▼</span> 426</td>
-                    <td className="border border-black p-2">-5.0%</td>
-                    <td className="border border-black p-2">28.4</td>
-                    <td className="border border-black p-2">-0.90</td>
+                  <tr className="font-bold text-base">
+                    <td className="border border-black p-1.5"><span className="text-red-500">▼</span> 426</td>
+                    <td className="border border-black p-1.5">-5.0%</td>
+                    <td className="border border-black p-1.5">28.4</td>
+                    <td className="border border-black p-1.5">-0.90</td>
                   </tr>
-                  <tr className="bg-[#00b0f0] text-white font-bold text-sm">
-                    <td className="border border-black p-2">平均RR產出</td>
-                    <td className="border border-black p-2">RR產出<br/>趨勢差異</td>
-                    <td className="border border-black p-2 bg-[#92d050] text-black">下周每日<br/>平均手數</td>
-                    <td className="border border-black p-2 bg-[#e6b8b7] text-black">平均庫存<br/>趨勢差異</td>
+                  <tr className="bg-[#00b0f0] text-white font-bold text-xs">
+                    <td className="border border-black p-1.5">平均RR產出</td>
+                    <td className="border border-black p-1.5">RR產出<br/>趨勢差異</td>
+                    <td className="border border-black p-1.5 bg-[#92d050] text-black">下周每日<br/>平均手數</td>
+                    <td className="border border-black p-1.5 bg-[#e6b8b7] text-black">平均庫存<br/>趨勢差異</td>
                   </tr>
-                  <tr className="font-bold text-xl">
-                    <td className="border border-black p-2"><span className="text-green-600">▲</span> 463</td>
-                    <td className="border border-black p-2">1.4%</td>
-                    <td className="border border-black p-2">38.2</td>
-                    <td className="border border-black p-2">-22.03%</td>
+                  <tr className="font-bold text-base">
+                    <td className="border border-black p-1.5"><span className="text-green-600">▲</span> 463</td>
+                    <td className="border border-black p-1.5">1.4%</td>
+                    <td className="border border-black p-1.5">38.2</td>
+                    <td className="border border-black p-1.5">-22.03%</td>
                   </tr>
                 </tbody>
               </table>
 
               {/* Ratio Change Record */}
-              <table className="w-full border-collapse border border-black text-center mt-0">
+              <table className="w-full border-collapse border border-black text-center mt-0 text-sm">
                 <thead>
                   <tr>
-                    <th colSpan={4} className="border border-black bg-[#92d050] p-2 font-bold text-lg">
+                    <th colSpan={4} className="border border-black bg-[#92d050] p-1.5 font-bold text-base">
                       <div>Ratio Change Record</div>
-                      <div className="text-sm font-normal">摻合重量調整紀錄</div>
+                      <div className="text-xs font-normal">摻合重量調整紀錄</div>
                     </th>
                   </tr>
                 </thead>
                 <tbody>
                   {getRatioChangeRecord(rrDetailsModal.rrName).slice(0, 7).map((record, i) => (
-                    <tr key={i} className="text-lg">
-                      <td className="border border-black p-2">{record.rubber}</td>
-                      <td className="border border-black p-2">{record.rr}</td>
-                      <td className="border border-black p-2">{record.date}</td>
-                      <td className="border border-black p-2">{Number(record.rrkg).toFixed(1)}</td>
+                    <tr key={i} className="text-base">
+                      <td className="border border-black p-1.5">{record.rubber}</td>
+                      <td className="border border-black p-1.5">{record.rr}</td>
+                      <td className="border border-black p-1.5">{record.date}</td>
+                      <td className="border border-black p-1.5">{Number(record.rrkg).toFixed(1)}</td>
                     </tr>
                   ))}
                   {getRatioChangeRecord(rrDetailsModal.rrName).slice(0, 7).length === 0 && (
                     <tr>
-                      <td colSpan={4} className="border border-black p-4 text-gray-500">No records found</td>
+                      <td colSpan={4} className="border border-black p-3 text-gray-500">No records found</td>
                     </tr>
                   )}
                 </tbody>
