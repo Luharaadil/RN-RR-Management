@@ -1,59 +1,61 @@
-import puppeteer from 'puppeteer';
-import axios from 'axios';
-import FormData from 'form-data';
-import fs from 'fs';
+const puppeteer = require('puppeteer');
+const axios = require('axios');
+const fs = require('fs');
+const FormData = require('form-data');
 
-const LINE_NOTIFY_TOKEN = process.env.LINE_NOTIFY_TOKEN;
-const TARGET_URL = process.env.TARGET_URL;
+const SITE_URL = process.env.SITE_URL;
+const LINE_CHANNEL_ACCESS_TOKEN = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+const LINE_GROUP_ID = process.env.LINE_GROUP_ID;
+const IMGBB_API_KEY = process.env.IMGBB_API_KEY;
 
-async function run() {
-  if (!LINE_NOTIFY_TOKEN || !TARGET_URL) {
-    console.error('Missing LINE_NOTIFY_TOKEN or TARGET_URL environment variables.');
+async function runReport() {
+  if (!LINE_CHANNEL_ACCESS_TOKEN || !LINE_GROUP_ID) {
+    console.error('Error: Missing LINE_CHANNEL_ACCESS_TOKEN or LINE_GROUP_ID');
     process.exit(1);
   }
 
-  const browser = await puppeteer.launch({ args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-  const page = await browser.newPage();
+  const browser = await puppeteer.launch({
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  });
   
-  // Set a wide viewport for the dashboard
-  await page.setViewport({ width: 1400, height: 900 });
-  
-  console.log(`Navigating to ${TARGET_URL}...`);
-  await page.goto(TARGET_URL, { waitUntil: 'networkidle2' });
-  
-  // Wait explicitly for the loading state to finish and table to appear
   try {
-    await page.waitForFunction(() => !document.body.innerText.includes('Loading dashboard data...'), { timeout: 15000 });
-    // Additional wait to make sure rendering is complete
-    await new Promise(r => setTimeout(r, 2000));
-  } catch (e) {
-    console.log('Timeout waiting for data to load, taking screenshot anyway.');
-  }
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 800 });
+    await page.goto(SITE_URL, { waitUntil: 'networkidle2' });
+    
+    // Wait for data to load
+    await new Promise(r => setTimeout(r, 5000)); 
 
-  const screenshotPath = 'dashboard.png';
-  await page.screenshot({ path: screenshotPath, fullPage: true });
-  console.log(`Screenshot saved to ${screenshotPath}`);
+    const screenshotPath = 'report.png';
+    await page.screenshot({ path: screenshotPath, fullPage: true });
 
-  await browser.close();
+    // Upload to ImgBB
+    const formData = new FormData();
+    formData.append('image', fs.createReadStream(screenshotPath));
+    const imgbbRes = await axios.post(`https://api.imgbb.com/1/upload?key=${IMGBB_API_KEY}`, formData, {
+      headers: formData.getHeaders()
+    });
+    
+    const imageUrl = imgbbRes.data.data.url;
 
-  // Send to LINE Notify
-  const form = new FormData();
-  form.append('message', 'Daily Inventory Dashboard Report');
-  form.append('imageFile', fs.createReadStream(screenshotPath));
-
-  console.log('Sending to LINE group...');
-  try {
-    await axios.post('https://notify-api.line.me/api/notify', form, {
+    // Send to LINE Group
+    await axios.post('https://api.line.me/v2/bot/message/push', {
+      to: LINE_GROUP_ID,
+      messages: [{ type: 'image', originalContentUrl: imageUrl, previewImageUrl: imageUrl }]
+    }, {
       headers: {
-        ...form.getHeaders(),
-        'Authorization': `Bearer ${LINE_NOTIFY_TOKEN}`
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${LINE_CHANNEL_ACCESS_TOKEN}`
       }
     });
-    console.log('Successfully sent screenshot to LINE.');
+    console.log('Success! Report sent to LINE.');
   } catch (error) {
-    console.error('Failed to send to LINE:', error.response ? error.response.data : error.message);
+    console.error('Action failed:', error.message);
     process.exit(1);
+  } finally {
+    await browser.close();
   }
 }
 
-run();
+runReport();
