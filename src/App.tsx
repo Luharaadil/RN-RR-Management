@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
 import { toBlob } from 'html-to-image';
-import { Camera, LogOut } from 'lucide-react';
+import { Camera, LogOut, Settings } from 'lucide-react';
 
 const DATA_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw7kry3iRAJrmu3HY_oi27sLavISvu6tSedhcLqcIR66IpRT56991H365LrPlj88zXIAg/exec';
 const AUTH_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwgP4jhdt0rom8RB3r3yvc42Xg-kgB4FgJ2DQTVOFHTir1g6mVFjCAMW5BB0dpbFbSARg/exec';
@@ -20,6 +20,10 @@ interface InventoryData {
   blendRatio: string;
   dailyValue: string;
 }
+
+const hasValidData = (d: InventoryData) => {
+  return d.rnStock !== '' || d.rrStock !== '' || d.dailyValue !== '' || d.batches !== '';
+};
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -44,6 +48,20 @@ export default function App() {
   }>({isOpen: false, rrName: '', type: 'NEXT_WEEK', data: []});
   const [rrDetailsModal, setRrDetailsModal] = useState<{isOpen: boolean, rrName: string, items: InventoryData[]}>({isOpen: false, rrName: '', items: []});
   const [rrUseType, setRrUseType] = useState<'NEXT_WEEK' | 'AVG_USAGE'>('NEXT_WEEK');
+  
+  // Custom Settings
+  const [avgDaysCount, setAvgDaysCount] = useState<number>(() => {
+    const saved = localStorage.getItem('avgDaysCount');
+    return saved ? parseInt(saved, 10) : 7;
+  });
+  const [settingsModal, setSettingsModal] = useState<boolean>(false);
+  const [tempAvgDays, setTempAvgDays] = useState<number>(avgDaysCount);
+
+  const saveSettings = () => {
+    setAvgDaysCount(tempAvgDays);
+    localStorage.setItem('avgDaysCount', tempAvgDays.toString());
+    setSettingsModal(false);
+  };
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -286,56 +304,50 @@ export default function App() {
     return result;
   };
 
-  // Helper to get deduplicated past 7 days data (excluding selected date)
-  const getPast7DaysData = (rrName: string) => {
+  // Helper to get deduplicated past days data (excluding selected date)
+  const getPastAvgDaysData = (rrName: string) => {
     if (!rrName || !selectedDate) return [];
     
     const selectedTime = new Date(selectedDate).getTime();
-    const endTime = selectedTime - (24 * 60 * 60 * 1000); // 1 day before selected date
-    const startTime = selectedTime - (7 * 24 * 60 * 60 * 1000); // 7 days before selected date
     
-    // Get all data for this RR, sorted by date
+    // Get all data for this RR, sorted by date DESCENDING
     const rrData = allData
-      .filter(d => d.rr === rrName)
-      .sort((a, b) => new Date(a.dateString).getTime() - new Date(b.dateString).getTime());
+      .filter(d => d.rr === rrName && hasValidData(d))
+      .sort((a, b) => new Date(b.dateString).getTime() - new Date(a.dateString).getTime());
 
-    const result: InventoryData[] = [];
+    // Filter strictly before selectedDate
+    const pastData = rrData.filter(d => new Date(d.dateString).getTime() < selectedTime);
     
-    // Iterate through the 7 days
-    for (let i = 1; i <= 7; i++) {
-      const currentDate = new Date(selectedTime - (i * 24 * 60 * 60 * 1000));
-      const dateString = currentDate.toISOString().split('T')[0];
-      const displayDate = currentDate.toLocaleDateString('en-GB');
-
-      // Find data for this date
-      let dayData = rrData.find(d => d.dateString === dateString);
-
-      // If no data, find the most recent available data
-      if (!dayData) {
-        const availableBefore = rrData.filter(d => new Date(d.dateString).getTime() < currentDate.getTime());
-        if (availableBefore.length > 0) {
-          dayData = { ...availableBefore[availableBefore.length - 1], dateString, displayDate };
-        } else {
-          // If no previous data, default to zeros
-          dayData = { ...rrData[0], dateString, displayDate, batches: "0", weekBatches: "0" };
-        }
+    const uniquePastData: InventoryData[] = [];
+    const seenDates = new Set<string>();
+    
+    // Iterate and collect exactly `avgDaysCount` records
+    for (const item of pastData) {
+      if (!seenDates.has(item.dateString)) {
+        seenDates.add(item.dateString);
+        uniquePastData.push({
+          ...item,
+          dailyValue: item.dailyValue === '' ? '0' : item.dailyValue,
+          batches: item.batches === '' ? '0' : item.batches,
+          weekBatches: item.weekBatches === '' ? '0' : item.weekBatches,
+          rrkg: item.rrkg === '' ? '0' : item.rrkg
+        });
+        if (uniquePastData.length === avgDaysCount) break;
       }
-      result.push(dayData);
     }
     
-    return result;
+    return uniquePastData.reverse(); // Return in chronological order
   };
 
-  // Calculate Average RR Usage for past 7 days (matching curve logic)
+  // Calculate Average RR Usage for past N days (matching curve logic)
   const getRRAvgUsage = (rrName: string) => {
-    const past7DaysData = getPast7DaysData(rrName);
-    const sum = past7DaysData.reduce((sum, item) => {
+    const pastData = getPastAvgDaysData(rrName);
+    const sum = pastData.reduce((sum, item) => {
       const batches = Number(item.batches) || 0;
       const rrkg = Number(item.rrkg) || 0;
       return sum + (batches * rrkg);
     }, 0);
-    // User requested 7-day average, so divide by 7 regardless of number of days with data
-    return sum / 7;
+    return sum / avgDaysCount;
   };
 
   // Get RR Use based on selected type
@@ -343,11 +355,11 @@ export default function App() {
     return rrUseType === 'NEXT_WEEK' ? getRRNWUse(rrName) : getRRAvgUsage(rrName);
   };
 
-  // Calculate 7-day RN Average
+  // Calculate N-day RN Average
   const getRNAverage = (rrName: string) => {
-    const past7DaysData = getPast7DaysData(rrName);
-    const sum = past7DaysData.reduce((acc, curr) => acc + (Number(curr.dailyValue) || 0), 0);
-    return past7DaysData.length > 0 ? Math.round(sum / past7DaysData.length) : 0;
+    const pastData = getPastAvgDaysData(rrName);
+    const sum = pastData.reduce((acc, curr) => acc + (Number(curr.dailyValue) || 0), 0);
+    return Math.round(sum / avgDaysCount);
   };
 
   // Calculate Use Day
@@ -374,7 +386,7 @@ export default function App() {
     if (rrUseType === 'NEXT_WEEK') {
       data = rawDataForDate.filter(d => d.rr === rrName);
     } else {
-      data = getPast7DaysData(rrName);
+      data = getPastAvgDaysData(rrName);
     }
 
     setRrUsageDetailsModal({
@@ -388,14 +400,14 @@ export default function App() {
   const handleDoubleClick = (rrName: string) => {
     if (!rrName || !selectedDate) return;
     
-    const past7DaysData = getPast7DaysData(rrName);
-    const sum = past7DaysData.reduce((acc, curr) => acc + (Number(curr.dailyValue) || 0), 0);
-    const average = Math.round(sum / 7);
+    const pastData = getPastAvgDaysData(rrName);
+    const sum = pastData.reduce((acc, curr) => acc + (Number(curr.dailyValue) || 0), 0);
+    const average = Math.round(sum / avgDaysCount);
 
     setDetailsModal({
       isOpen: true,
       rrName,
-      data: past7DaysData,
+      data: pastData,
       average
     });
   };
@@ -414,34 +426,33 @@ export default function App() {
     // Group by rubber
     const rubbers = Array.from(new Set(records.map(d => d.rubber)));
     
-    const changes: {rubber: string, rr: string, date: string, rrkg: string}[] = [];
+    const changes: {rubber: string, rr: string, date: string, rrkg: string, timestamp: number}[] = [];
     
     rubbers.forEach(rubber => {
-      const rubberRecords = records.filter(d => d.rubber === rubber).sort((a, b) => new Date(b.dateString).getTime() - new Date(a.dateString).getTime());
+      // Sort oldest to newest
+      const rubberRecords = records.filter(d => d.rubber === rubber).sort((a, b) => new Date(a.dateString).getTime() - new Date(b.dateString).getTime());
       
       let currentRrkg: string | null = null;
       rubberRecords.forEach(record => {
         if (record.rrkg !== currentRrkg) {
-          // Format date as dd-mm-yyyy
+          // Format date as dd/mm/yyyy
           const dateParts = record.displayDate.split('/');
-          const formattedDate = dateParts.length === 3 ? `${dateParts[0]}-${dateParts[1]}-${dateParts[2]}` : record.displayDate;
+          const formattedDate = dateParts.length === 3 ? `${dateParts[0]}/${dateParts[1]}/${dateParts[2]}` : record.displayDate;
           
           changes.push({
             rubber: record.rubber,
             rr: record.rr,
             date: formattedDate,
-            rrkg: record.rrkg
+            rrkg: record.rrkg,
+            timestamp: new Date(record.dateString).getTime()
           });
           currentRrkg = record.rrkg;
         }
       });
     });
     
-    return changes.sort((a, b) => {
-       const dateA = a.date.split('-').reverse().join('-');
-       const dateB = b.date.split('-').reverse().join('-');
-       return new Date(dateB).getTime() - new Date(dateA).getTime();
-    });
+    // Final result newest first
+    return changes.sort((a, b) => b.timestamp - a.timestamp);
   };
 
   return (
@@ -520,7 +531,12 @@ export default function App() {
                 </div>
               </th>
               <th rowSpan={2} className="border-b border-r border-gray-300 bg-[#fcd5b4] bg-opacity-70 p-2.5 w-28 align-middle">
-                <div className="font-semibold text-xs text-gray-800">RN AVERAGE</div>
+                <div className="font-semibold text-xs text-gray-800 flex items-center justify-center space-x-1">
+                  <span>RN AVERAGE</span>
+                  <button onClick={() => setSettingsModal(true)} className="text-gray-600 hover:text-gray-900 transition-colors" title="Settings">
+                    <Settings size={14} />
+                  </button>
+                </div>
                 <div className="text-[9px] font-normal text-gray-600 mt-1">(平均RR產出量)</div>
               </th>
               <th rowSpan={2} className="border-b border-gray-300 bg-[#fcd5b4] bg-opacity-70 p-2.5 w-28 align-middle">
@@ -610,12 +626,55 @@ export default function App() {
         </div>
       </div>
 
+      {/* Settings Modal */}
+      {settingsModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-sm w-full overflow-hidden border border-gray-300">
+            <div className="bg-gray-100 border-b border-gray-300 px-4 py-3 flex justify-between items-center">
+              <h3 className="font-bold text-lg text-gray-800 flex items-center space-x-2">
+                <Settings size={18} />
+                <span>Calculation Settings</span>
+              </h3>
+              <button onClick={() => setSettingsModal(false)} className="text-gray-500 hover:text-gray-800 font-bold text-xl leading-none">
+                &times;
+              </button>
+            </div>
+            <div className="p-6 space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">
+                  Average Calculation Days (RN Generation)
+                </label>
+                <input 
+                  type="number" 
+                  min="1" 
+                  max="30" 
+                  value={tempAvgDays}
+                  onChange={(e) => setTempAvgDays(parseInt(e.target.value) || 1)}
+                  className="w-full border border-gray-300 rounded-md shadow-sm p-2 text-gray-900 bg-white"
+                />
+                <p className="text-xs text-gray-500 mt-2">
+                  Changes made here are stored in your browser's local storage.
+                </p>
+              </div>
+              <div className="flex justify-end pt-2">
+                <button 
+                  onClick={saveSettings}
+                  className="bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition-colors text-sm"
+                >
+                  Save Settings
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Details Modal (RN Average) */}
       {detailsModal.isOpen && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden border-2 border-black">
             <div className="bg-[#fcd5b4] border-b border-black px-4 py-3 flex justify-between items-center">
-              <h3 className="font-bold text-xl text-black">7-Day Average: {detailsModal.rrName}</h3>
+              <h3 className="font-bold text-xl text-black">{avgDaysCount}-Day Average: {detailsModal.rrName}</h3>
               <button onClick={() => setDetailsModal({...detailsModal, isOpen: false})} className="text-black hover:text-gray-600 font-bold text-2xl leading-none">
                 &times;
               </button>
@@ -635,8 +694,8 @@ export default function App() {
                       <td className="border border-black p-1.5 font-bold">{d.dailyValue || '0'}</td>
                     </tr>
                   ))}
-                  {/* Fill empty rows if less than 7 days of data */}
-                  {Array.from({ length: Math.max(0, 7 - detailsModal.data.length) }).map((_, i) => (
+                  {/* Fill empty rows if less than avgDaysCount of data */}
+                  {Array.from({ length: Math.max(0, avgDaysCount - detailsModal.data.length) }).map((_, i) => (
                     <tr key={`empty-${i}`} className="text-gray-400 bg-gray-50">
                       <td className="border border-black p-1.5">--</td>
                       <td className="border border-black p-1.5 italic">0 (No Data)</td>
@@ -651,13 +710,13 @@ export default function App() {
                     </td>
                   </tr>
                   <tr className="bg-[#92d050] font-bold text-base">
-                    <td className="border border-black p-1.5 text-right">Average (Sum ÷ 7):</td>
+                    <td className="border border-black p-1.5 text-right">Average (Sum ÷ {avgDaysCount}):</td>
                     <td className="border border-black p-1.5 text-lg">{detailsModal.average}</td>
                   </tr>
                 </tfoot>
               </table>
               <div className="text-sm text-gray-600 italic text-center">
-                * The average is always divided by 7 days.
+                * The average is always divided by {avgDaysCount} days.
               </div>
             </div>
           </div>
@@ -670,7 +729,7 @@ export default function App() {
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full overflow-hidden border-2 border-black">
             <div className="bg-[#fcd5b4] border-b border-black px-4 py-3 flex justify-between items-center">
               <h3 className="font-bold text-xl text-black">
-                {rrUsageDetailsModal.type === 'NEXT_WEEK' ? 'Next Week Usage' : '7-Day Avg Usage'}: {rrUsageDetailsModal.rrName}
+                {rrUsageDetailsModal.type === 'NEXT_WEEK' ? 'Next Week Usage' : `${avgDaysCount}-Day Avg Usage`}: {rrUsageDetailsModal.rrName}
               </h3>
               <button onClick={() => setRrUsageDetailsModal({...rrUsageDetailsModal, isOpen: false})} className="text-black hover:text-gray-600 font-bold text-2xl leading-none">
                 &times;
@@ -713,7 +772,7 @@ export default function App() {
                           const batches = Number(rrUsageDetailsModal.type === 'AVG_USAGE' ? item.batches : item.weekBatches) || 0;
                           const rrkg = Number(item.rrkg) || 0;
                           return sum + (batches * rrkg);
-                        }, 0) / (rrUsageDetailsModal.type === 'AVG_USAGE' ? 7 : 1)
+                        }, 0) / (rrUsageDetailsModal.type === 'AVG_USAGE' ? avgDaysCount : 1)
                       ).toFixed(1)}
                     </td>
                   </tr>
