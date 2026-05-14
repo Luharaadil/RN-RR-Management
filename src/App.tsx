@@ -1,5 +1,10 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, LabelList } from 'recharts';
+import { toBlob } from 'html-to-image';
+import { Camera, LogOut } from 'lucide-react';
+
+const DATA_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbw7kry3iRAJrmu3HY_oi27sLavISvu6tSedhcLqcIR66IpRT56991H365LrPlj88zXIAg/exec';
+const AUTH_SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbwgP4jhdt0rom8RB3r3yvc42Xg-kgB4FgJ2DQTVOFHTir1g6mVFjCAMW5BB0dpbFbSARg/exec';
 
 interface InventoryData {
   dateString: string;
@@ -17,7 +22,14 @@ interface InventoryData {
 }
 
 export default function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [loginError, setLoginError] = useState<string>('');
+  const [loginLoading, setLoginLoading] = useState<boolean>(false);
   const [allData, setAllData] = useState<InventoryData[]>([]);
+  const [copiedMain, setCopiedMain] = useState(false);
+  const [copiedCurve, setCopiedCurve] = useState(false);
+  const mainRef = useRef<HTMLDivElement>(null);
+  const curveRef = useRef<HTMLDivElement>(null);
   const [selectedDate, setSelectedDate] = useState<string>('');
   const [selectedRubber, setSelectedRubber] = useState<string | null>(null);
   const [curveModal, setCurveModal] = useState<{isOpen: boolean, rrName: string | null}>({isOpen: false, rrName: null});
@@ -34,12 +46,20 @@ export default function App() {
   const [rrUseType, setRrUseType] = useState<'NEXT_WEEK' | 'AVG_USAGE'>('NEXT_WEEK');
 
   useEffect(() => {
-    fetch('https://script.google.com/macros/s/AKfycbw7kry3iRAJrmu3HY_oi27sLavISvu6tSedhcLqcIR66IpRT56991H365LrPlj88zXIAg/exec')
+    if (!isAuthenticated) return;
+    
+    fetch(DATA_SCRIPT_URL)
       .then(response => {
         if (!response.ok) throw new Error('Failed to fetch data');
         return response.json();
       })
       .then(rawData => {
+        console.log("Raw Data:", rawData);
+        if (rawData && rawData.error) {
+          setError(`Server Error: ${rawData.error}`);
+          setLoading(false);
+          return;
+        }
         if (Array.isArray(rawData) && rawData.length > 1) {
           const formattedData = rawData.slice(1).map((row: any[]) => {
             const dateObj = row[0] ? new Date(row[0]) : null;
@@ -89,7 +109,7 @@ export default function App() {
         setError(err.message);
         setLoading(false);
       });
-  }, []);
+  }, [isAuthenticated]);
 
   // Filter data based on the selected date
   const rawDataForDate = allData.filter(item => item.dateString === selectedDate);
@@ -103,6 +123,150 @@ export default function App() {
     }
   });
   const data = Array.from(groupedDataMap.values());
+
+  const handleLogin = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const target = e.target as typeof e.target & {
+      userid: { value: string };
+      password: { value: string };
+    };
+    const userid = target.userid.value;
+    const password = target.password.value;
+    
+    setLoginLoading(true);
+    setLoginError('');
+
+    if (userid === '180044' && password === 'MX180044') {
+      setIsAuthenticated(true);
+      setLoginLoading(false);
+      return;
+    }
+    
+    fetch(`${AUTH_SCRIPT_URL}?action=getUsers`)
+      .then(res => res.json())
+      .then((data: any) => {
+        if (data && data.error) {
+          setLoginError(`Server Error: ${data.error}`);
+          return;
+        }
+        
+        // Handle the format: { "users": [ { "id": "...", "password": "...", "role": "..." } ] }
+        if (data && data.users && Array.isArray(data.users)) {
+          const found = data.users.find((user: any) => String(user.id).trim() === userid && String(user.password).trim() === String(password));
+          if (found) {
+            setIsAuthenticated(true);
+          } else {
+            setLoginError('Invalid User ID or Password');
+          }
+          return;
+        }
+        
+        // Fallback for 2D array format: [["MIXING", 123, "User"], ...]
+        if (Array.isArray(data)) {
+          if (data.length === 0) {
+            setLoginError('No user data found in the sheet.');
+            return;
+          }
+          
+          const found = data.find(row => String(row[0]).trim() === userid && String(row[1]).trim() === String(password));
+          
+          if (found) {
+            setIsAuthenticated(true);
+          } else {
+            setLoginError('Invalid User ID or Password');
+          }
+        } else {
+           setLoginError(`Unexpected response: ${JSON.stringify(data).substring(0, 100)}...`);
+        }
+      })
+      .catch((err) => {
+        setLoginError(`Error connecting: ${err.message}`);
+      })
+      .finally(() => {
+        setLoginLoading(false);
+      });
+  };
+
+  const handleCopyPicture = async (ref: React.RefObject<HTMLDivElement>, type: 'main' | 'curve') => {
+    if (!ref.current) return;
+    try {
+      const scrollWidth = ref.current.scrollWidth;
+      const scrollHeight = ref.current.scrollHeight;
+      
+      const blob = await toBlob(ref.current, {
+        pixelRatio: 2,
+        backgroundColor: '#ffffff', // Ensure white background
+        width: scrollWidth,
+        height: scrollHeight,
+        style: {
+          width: `${scrollWidth}px`,
+          minWidth: `${scrollWidth}px`,
+          maxWidth: `${scrollWidth}px`,
+          height: `${scrollHeight}px`,
+          maxHeight: 'none',
+          margin: '0',
+          transform: 'none',
+        }
+      });
+      
+      if (blob) {
+        navigator.clipboard.write([
+          new ClipboardItem({ 'image/png': blob })
+        ]).then(() => {
+          if (type === 'main') {
+            setCopiedMain(true);
+            setTimeout(() => setCopiedMain(false), 2000);
+          } else {
+            setCopiedCurve(true);
+            setTimeout(() => setCopiedCurve(false), 2000);
+          }
+        }).catch(err => {
+          alert('Failed to copy image to clipboard: ' + err);
+        });
+      }
+    } catch (err) {
+      console.error('Failed to capture image', err);
+      alert('Failed to capture image: ' + (err instanceof Error ? err.message : String(err)));
+    }
+  };
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-screen bg-gray-100 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white p-8 rounded-lg shadow-lg">
+          <h2 className="text-2xl font-bold text-center mb-6">System Login</h2>
+          {loginError && <div className="mb-4 text-red-500 text-sm text-center">{loginError}</div>}
+          <form onSubmit={handleLogin} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700">User ID</label>
+              <input 
+                type="text" 
+                name="userid" 
+                required 
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2 text-gray-900 bg-white"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Password</label>
+              <input 
+                type="password" 
+                name="password" 
+                required 
+                className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm p-2 text-gray-900 bg-white"
+              />
+            </div>
+            <button 
+              type="submit" 
+              disabled={loginLoading}
+              className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400"
+            >
+              {loginLoading ? 'Authenticating...' : 'Login'}
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   if (loading) return <div className="p-8 text-center text-xl font-bold">Loading dashboard data...</div>;
   if (error) return <div className="p-8 text-red-500 text-center text-xl font-bold">Error: {error}</div>;
@@ -282,8 +446,26 @@ export default function App() {
 
   return (
     <div className="p-4 bg-gray-50 min-h-screen font-sans text-gray-800 overflow-x-auto relative">
-      <div className="min-w-[1000px] max-w-7xl mx-auto shadow-lg bg-white rounded-lg p-6">
-        <h1 className="text-2xl font-bold mb-6 text-gray-900 border-b pb-2">Daily Inventory Dashboard</h1>
+      <div id="main-dashboard" ref={mainRef} className="w-full shadow-lg bg-white rounded-lg p-6 min-w-[1000px]">
+        <div className="flex justify-between items-center mb-6 border-b pb-2">
+          <h1 className="text-2xl font-bold text-gray-900">Daily Inventory Dashboard</h1>
+          <div className="flex items-center space-x-2">
+            <button 
+              onClick={() => handleCopyPicture(mainRef, 'main')}
+              className={`flex items-center space-x-1 py-1.5 px-3 rounded text-sm transition-colors ${copiedMain ? 'bg-green-100 text-green-800' : 'bg-gray-100 hover:bg-gray-200 text-gray-800'}`}
+            >
+              <Camera size={16} />
+              <span>{copiedMain ? 'Copied' : 'Copy Picture'}</span>
+            </button>
+            <button 
+              onClick={() => setIsAuthenticated(false)}
+              className="flex items-center space-x-1 bg-red-50 hover:bg-red-100 text-red-600 py-1.5 px-3 rounded text-sm transition-colors"
+            >
+              <LogOut size={16} />
+              <span>Logout</span>
+            </button>
+          </div>
+        </div>
         {/* Top Header Row */}
         <div className="flex border border-gray-300 rounded-md overflow-hidden mb-6 w-max bg-gray-50 shadow-sm">
           <div className="bg-[#92d050] bg-opacity-90 p-2 border-r border-gray-300 font-bold text-lg flex items-center justify-center w-24 text-gray-800">
@@ -701,15 +883,24 @@ export default function App() {
           })();
 
           return (
-            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-              <div className="bg-white rounded-lg shadow-xl max-w-4xl w-full max-h-[90vh] overflow-hidden border-2 border-black flex flex-col">
-                <div className="bg-[#fcd5b4] border-b border-black px-4 py-3 flex justify-between items-center shrink-0">
+            <div className="fixed inset-0 bg-black bg-opacity-50 flex items-start justify-center z-50 p-4 overflow-auto">
+              <div ref={curveRef} className="bg-white rounded-lg shadow-xl w-full min-w-[1200px] max-w-[1200px] my-auto border-2 border-black flex flex-col shrink-0">
+                <div className="bg-[#fcd5b4] border-b border-black px-4 py-3 flex justify-between items-center shrink-0 rounded-t-md">
                   <h3 className="font-bold text-xl text-black">{curveModal.rrName} RR+RN Inventory and Urgent Order Usage Trend Chart</h3>
-                  <button onClick={() => setCurveModal({isOpen: false, rrName: null})} className="text-black hover:text-gray-600 font-bold text-2xl leading-none">
-                    &times;
-                  </button>
+                  <div className="flex items-center space-x-4">
+                    <button 
+                      onClick={() => handleCopyPicture(curveRef, 'curve')}
+                      className={`flex items-center space-x-1 py-1 px-2 rounded text-sm border ${copiedCurve ? 'bg-green-100 border-green-300 text-green-800' : 'bg-white hover:bg-gray-100 text-gray-800 border-gray-300'}`}
+                    >
+                      <Camera size={16} />
+                      <span>{copiedCurve ? 'Copied' : 'Copy'}</span>
+                    </button>
+                    <button onClick={() => setCurveModal({isOpen: false, rrName: null})} className="text-black hover:text-gray-600 font-bold text-2xl leading-none">
+                      &times;
+                    </button>
+                  </div>
                 </div>
-                <div className="p-4 flex-grow overflow-y-auto">
+                <div id="curve-dashboard" className="p-4 flex flex-col">
                   <div className="h-[350px] w-full mb-4 bg-[#333333] rounded-lg p-4 border border-gray-700">
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={curveData}>
